@@ -1,0 +1,18 @@
+[project]
+name = "music-tagger"
+version = "0.1.0"
+description = "Automated music metadata tagger using AcoustID, MusicBrainz, and Claude AI"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Personal", email = "music-tagger@local" },
+]
+dependencies = [
+    "pyacoustid",
+    "musicbrainzngs",
+    "mutagen",
+    "anthropic",
+]
+
+[project.scripts]
+music-tagger = "music_tagger.__main__:main"

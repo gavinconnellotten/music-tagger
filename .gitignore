@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+*.json
+music_tagger.log
+music_tagger_report.json
+.env
+.env.*
+dist/
+build/
+*.egg-info/

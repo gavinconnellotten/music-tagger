@@ -1,0 +1,4 @@
+pyacoustid
+musicbrainzngs
+mutagen
+anthropic

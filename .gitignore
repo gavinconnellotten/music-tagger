@@ -13,3 +13,5 @@ music_tagger_report.json
 dist/
 build/
 *.egg-info/
+keys.txt
+

@@ -15,3 +15,8 @@ build/
 *.egg-info/
 keys.txt
 
+# Runtime artifacts
+*.bak
+.music_tagger.lock
+music_tagger_report.html
+

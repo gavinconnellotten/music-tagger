@@ -18,6 +18,7 @@ Usage:
   python -m music_tagger --undo <run-id>
 """
 import os
+import re
 import sys
 import io
 import time
@@ -181,6 +182,7 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
         "cur_artist": proposal["cur_artist"], "cur_album": proposal["cur_album"],
         "chosen": chosen_summary, "confidence": decision["confidence"],
         "reasoning": decision["reasoning"],
+        "unreadable": proposal.get("unreadable", []),
         "files": files, "n_files": len(files), "n_changed_files": n_changed,
     }
 
@@ -215,8 +217,12 @@ def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: 
         lookup_cached = proposal is not None
         if proposal is None:
             proposal = matcher.match_album(files)
-            store.put_lookup(key, str(folder), proposal["recommendation"], proposal)
+            # Don't cache transient errors — let them retry next run.
+            if proposal["recommendation"] != "error":
+                store.put_lookup(key, str(folder), proposal["recommendation"], proposal)
         proposal["_album_key"] = key
+        if proposal.get("unreadable"):
+            log.info(f"    skipped {len(proposal['unreadable'])} unreadable file(s)")
 
         if client is None and not eval_only and proposal["recommendation"] in ("low", "medium"):
             import anthropic
@@ -299,6 +305,59 @@ def cmd_undo(db_path: str, run_id: str) -> None:
     store.close()
 
 
+# ── corruption scan ───────────────────────────────────────────────────────────
+def _short_reason(e) -> str:
+    s = str(e)
+    if "is not a valid FLAC file" in s:
+        return "invalid FLAC (corrupt)"
+    if "read 0 bytes" in s:
+        return "empty / zero-byte read"
+    m = re.search(r"said (\d+) bytes, read (\d+) bytes", s)
+    if m:
+        return f"truncated ({m.group(2)}/{m.group(1)} bytes)"
+    if "not a valid" in s or "Errno 2" in s:
+        return "missing/invalid"
+    return s[-90:]
+
+
+def cmd_list_unreadable(directory: str) -> None:
+    """Read-only scan: attempt to read every audio file, list the ones that fail."""
+    albums = matcher.cluster_albums(directory)
+    total = sum(len(f) for f in albums.values())
+    log.info(f"Scanning {total} files across {len(albums)} album(s) for unreadable files...")
+
+    bad_by_album: dict[str, list[tuple[str, str]]] = {}
+    n_bad = 0
+    for folder, files in albums.items():
+        for p in files:
+            try:
+                matcher._read_item(p, attempts=2, delay=0.3)
+            except Exception as e:  # noqa: BLE001
+                bad_by_album.setdefault(str(folder), []).append((p.name, _short_reason(e)))
+                n_bad += 1
+
+    out = Path("music_tagger_unreadable.txt")
+    lines = [
+        f"# MusicTagger unreadable-file scan — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"# {n_bad} unreadable of {total} files across {len(bad_by_album)} album(s)",
+        "",
+    ]
+    for folder in sorted(bad_by_album):
+        items = bad_by_album[folder]
+        lines.append(f"[{folder}]  {len(items)}/{len(albums[Path(folder)])} unreadable")
+        for name, reason in sorted(items):
+            lines.append(f"  {name}  ::  {reason}")
+        lines.append("")
+    out.write_text("\n".join(lines), encoding="utf-8")
+
+    log.info("═" * 64)
+    log.info(f"Unreadable: {n_bad} file(s) in {len(bad_by_album)} album(s) (of {total} scanned)")
+    for folder in sorted(bad_by_album):
+        log.info(f"  {len(bad_by_album[folder]):>3} × {Path(folder).name}")
+    log.info(f"Full list: {out.resolve()}")
+    log.info("═" * 64)
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 def main() -> None:
     p = argparse.ArgumentParser(description="Album-clustered music tagger (beets + Claude)")
@@ -313,6 +372,8 @@ def main() -> None:
     p.add_argument("--eval-only", action="store_true", help="Skip Claude; only show strong matches")
     p.add_argument("--list-runs", action="store_true", help="List apply runs available to undo")
     p.add_argument("--undo", metavar="RUN_ID", help="Restore original tags from a prior apply run")
+    p.add_argument("--list-unreadable", action="store_true",
+                   help="Read-only scan: list corrupt/unreadable audio files under <directory>")
     args = p.parse_args()
 
     if args.list_runs:
@@ -320,6 +381,11 @@ def main() -> None:
         return
     if args.undo:
         cmd_undo(args.db, args.undo)
+        return
+    if args.list_unreadable:
+        if not args.directory or not Path(args.directory).is_dir():
+            p.error("--list-unreadable needs a valid directory")
+        cmd_list_unreadable(args.directory)
         return
 
     if not args.directory or not Path(args.directory).is_dir():

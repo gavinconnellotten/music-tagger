@@ -46,8 +46,11 @@ class Store:
 
     # ── lookup cache (MusicBrainz proposals) ──────────────────────────────
     def get_lookup(self, album_key: str) -> dict | None:
+        # Never serve a cached 'error' — those are transient (flaky reads/network)
+        # and should be retried on the next run.
         row = self.conn.execute(
-            "SELECT proposal_json FROM lookup_cache WHERE album_key = ?", (album_key,)
+            "SELECT proposal_json FROM lookup_cache WHERE album_key = ? AND recommendation != 'error'",
+            (album_key,),
         ).fetchone()
         return json.loads(row["proposal_json"]) if row else None
 

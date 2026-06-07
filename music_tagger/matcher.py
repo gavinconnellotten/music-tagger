@@ -4,6 +4,7 @@ Clusters files by folder, runs beets' MusicBrainz autotagger over each album,
 and returns a JSON-serializable proposal (recommendation + ranked candidates,
 each with per-file proposed tags). No library DB; no files are moved or written.
 """
+import time
 import hashlib
 import logging
 from pathlib import Path
@@ -87,26 +88,50 @@ def _trackinfo_to_tags(ti, info) -> dict:
     }
 
 
-def match_album(files: list[Path]) -> dict:
-    """Run the autotagger over one album's files. Returns a serializable proposal dict."""
+def _read_item(path: Path, attempts: int = 3, delay: float = 0.5):
+    """Read one file into a beets Item, retrying transient failures (flaky network drive)."""
     from beets.library import Item
+    last = None
+    for i in range(attempts):
+        try:
+            return Item.from_path(str(path))
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if i < attempts - 1:
+                time.sleep(delay)
+    raise last
+
+
+def match_album(files: list[Path]) -> dict:
+    """Run the autotagger over one album's files. Returns a serializable proposal dict.
+
+    Files that can't be read (corrupt, or a transient network blip after retries) are
+    skipped rather than failing the whole album; they're reported in `unreadable`.
+    """
     from beets.autotag import match
 
     current = {str(p): read_existing_tags(str(p)) for p in files}
 
+    items, unreadable = [], []
+    for p in files:
+        try:
+            items.append(_read_item(p))
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"Unreadable, skipping: {p.name} :: {e!r}")
+            unreadable.append(str(p))
+
+    if not items:
+        return {"current": current, "cur_artist": "", "cur_album": "",
+                "recommendation": "error", "error": "all files unreadable",
+                "unreadable": unreadable, "candidates": []}
+
     try:
-        items = [Item.from_path(str(p)) for p in files]
         cur_artist, cur_album, proposal = match.tag_album(items)
     except Exception as e:  # noqa: BLE001 - network / parse failures shouldn't kill the run
         log.warning(f"tag_album failed for {files[0].parent}: {e!r}")
-        return {
-            "current": current,
-            "cur_artist": "",
-            "cur_album": "",
-            "recommendation": "error",
-            "error": repr(e),
-            "candidates": [],
-        }
+        return {"current": current, "cur_artist": "", "cur_album": "",
+                "recommendation": "error", "error": repr(e),
+                "unreadable": unreadable, "candidates": []}
 
     # Map beets Item.path (bytes) back to the original file path string we keyed `current` on.
     def item_path(it) -> str:
@@ -137,6 +162,7 @@ def match_album(files: list[Path]) -> dict:
         "cur_artist": cur_artist or "",
         "cur_album": cur_album or "",
         "recommendation": proposal.recommendation.name,  # none | low | medium | strong
+        "unreadable": unreadable,
         "candidates": candidates,
     }
 

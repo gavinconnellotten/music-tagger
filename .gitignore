@@ -19,5 +19,6 @@ keys.txt
 *.bak
 *.db
 .music_tagger.lock
-music_tagger_report.html
+music_tagger_*.html
+music_tagger_unreadable.txt
 

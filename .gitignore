@@ -17,6 +17,7 @@ keys.txt
 
 # Runtime artifacts
 *.bak
+*.db
 .music_tagger.lock
 music_tagger_report.html
 

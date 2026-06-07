@@ -8,8 +8,7 @@ authors = [
     { name = "Personal", email = "music-tagger@local" },
 ]
 dependencies = [
-    "pyacoustid",
-    "musicbrainzngs",
+    "beets",
     "mutagen",
     "anthropic",
 ]

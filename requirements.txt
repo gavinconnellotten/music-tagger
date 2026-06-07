@@ -1,4 +1,3 @@
-pyacoustid
-musicbrainzngs
+beets
 mutagen
 anthropic

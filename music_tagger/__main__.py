@@ -54,6 +54,8 @@ def _load_keys() -> None:
             name, value = name.strip(), value.strip()
             if name in ("ANTHROPIC_API_KEY", "anthropicKey", "anthropic_api_key") and value:
                 os.environ.setdefault("ANTHROPIC_API_KEY", value)
+            if name in ("ACOUSTID_API_KEY", "acoustIdKey", "acoustidKey", "acoustid_key") and value:
+                os.environ.setdefault("ACOUSTID_API_KEY", value)
         return
 
 
@@ -124,14 +126,15 @@ def _decide(proposal: dict, folder: str, store: Store, client, model: str,
 
     if rec == "error":
         out.update(action="error", reasoning=proposal.get("error", "match error"))
-    elif rec == "none" or not cands:
-        out.update(action="unresolved", reasoning="No MusicBrainz candidates")
+    elif not cands:
+        out.update(action="unresolved", reasoning="No candidates (tag search + fingerprint)")
     elif rec == "strong":
         out.update(action="auto", chosen_index=0, confidence=100,
                    reasoning="Strong autotag match")
     elif eval_only:
         out.update(action="unresolved", reasoning=f"{rec} match — Claude skipped (--eval-only)")
     else:
+        # low / medium / (none-but-fingerprint-found-candidates) → let Claude adjudicate
         chash = matcher.candidates_hash(proposal)
         verdict = store.get_claude(proposal["_album_key"], chash) if use_cache else None
         if verdict is not None:
@@ -188,8 +191,8 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
 
 
 def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: str,
-        confidence: int, use_cache: bool, eval_only: bool) -> None:
-    matcher.init_beets()
+        confidence: int, use_cache: bool, eval_only: bool, fingerprint: bool = False) -> None:
+    matcher.init_beets(fingerprint=fingerprint)
     store = Store(db_path)
     client = None  # created lazily on first Claude call
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -204,6 +207,8 @@ def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: 
 
     log.info(f"{len(albums)} album folder(s) found; processing {len(folders)}"
              + (f" (--limit {limit})" if limit else ""))
+    if fingerprint:
+        log.info("FINGERPRINT pass — re-matching no-match albums via AcoustID (chroma)")
     log.info("DRY RUN — no files will be modified" if not apply else f"APPLY — run_id={run_id}")
     log.info("─" * 64)
 
@@ -214,6 +219,9 @@ def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: 
         log.info(f"[{i}/{len(folders)}] {Path(folder).name}  ({len(files)} files)")
 
         proposal = store.get_lookup(key) if use_cache else None
+        # In fingerprint mode, re-attempt albums that previously got no tag match.
+        if proposal is not None and fingerprint and proposal.get("recommendation") == "none":
+            proposal = None
         lookup_cached = proposal is not None
         if proposal is None:
             proposal = matcher.match_album(files)
@@ -224,7 +232,8 @@ def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: 
         if proposal.get("unreadable"):
             log.info(f"    skipped {len(proposal['unreadable'])} unreadable file(s)")
 
-        if client is None and not eval_only and proposal["recommendation"] in ("low", "medium"):
+        if (client is None and not eval_only
+                and proposal["candidates"] and proposal["recommendation"] != "strong"):
             import anthropic
             client = anthropic.Anthropic()
 
@@ -307,7 +316,7 @@ def cmd_undo(db_path: str, run_id: str) -> None:
 
 # ── corruption scan ───────────────────────────────────────────────────────────
 def _short_reason(e) -> str:
-    s = str(e)
+    s = repr(e)
     if "is not a valid FLAC file" in s:
         return "invalid FLAC (corrupt)"
     if "read 0 bytes" in s:
@@ -370,6 +379,9 @@ def main() -> None:
                    help="Min Claude confidence to write on --apply (default 70)")
     p.add_argument("--no-cache", action="store_true", help="Ignore cached lookups/verdicts")
     p.add_argument("--eval-only", action="store_true", help="Skip Claude; only show strong matches")
+    p.add_argument("--fingerprint", action="store_true",
+                   help="Fallback pass: AcoustID-fingerprint no-match albums (needs ACOUSTID_API_KEY). "
+                        "Run after a normal pass — only cached no-match albums are re-fingerprinted.")
     p.add_argument("--list-runs", action="store_true", help="List apply runs available to undo")
     p.add_argument("--undo", metavar="RUN_ID", help="Restore original tags from a prior apply run")
     p.add_argument("--list-unreadable", action="store_true",
@@ -396,6 +408,11 @@ def main() -> None:
                     "Running with --eval-only behavior for this session.")
         args.eval_only = True
 
+    if args.fingerprint and not os.environ.get("ACOUSTID_API_KEY"):
+        log.warning("--fingerprint needs ACOUSTID_API_KEY (free at https://acoustid.org/api-key). "
+                    "Disabling fingerprint fallback for this session.")
+        args.fingerprint = False
+
     try:
         _acquire_lock()
     except RuntimeError as e:
@@ -404,7 +421,7 @@ def main() -> None:
 
     run(args.directory, apply=args.apply, limit=args.limit, model=args.model,
         db_path=args.db, confidence=args.confidence,
-        use_cache=not args.no_cache, eval_only=args.eval_only)
+        use_cache=not args.no_cache, eval_only=args.eval_only, fingerprint=args.fingerprint)
 
 
 if __name__ == "__main__":

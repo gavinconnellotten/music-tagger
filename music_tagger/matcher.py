@@ -4,6 +4,8 @@ Clusters files by folder, runs beets' MusicBrainz autotagger over each album,
 and returns a JSON-serializable proposal (recommendation + ranked candidates,
 each with per-file proposed tags). No library DB; no files are moved or written.
 """
+import os
+import re
 import time
 import hashlib
 import logging
@@ -18,25 +20,50 @@ _MAX_CANDIDATES = 5
 _beets_ready = False
 
 
-def init_beets() -> None:
-    """Load the MusicBrainz metadata-source plugin once (beets 2.x requirement)."""
+def init_beets(fingerprint: bool = False) -> None:
+    """Load beets metadata-source plugins once (beets 2.x requirement).
+
+    fingerprint=True also loads `chroma` (AcoustID), enabling fingerprint matching.
+    NOTE: beets' load_plugins() is one-shot, so the fingerprint choice is fixed for
+    the process — pick it at startup.
+    """
     global _beets_ready
     if _beets_ready:
         return
     from beets import config, plugins
-    config["plugins"] = ["musicbrainz"]
+    plugin_list = ["musicbrainz"]
+    if fingerprint:
+        plugin_list.append("chroma")
+        # fpcalc ships in the venv Scripts dir — make sure chroma can find it.
+        scripts = Path(__file__).resolve().parent.parent / ".venv" / "Scripts"
+        if scripts.exists():
+            os.environ["PATH"] = str(scripts) + os.pathsep + os.environ.get("PATH", "")
+        key = os.environ.get("ACOUSTID_API_KEY", "")
+        if key:
+            config["acoustid"]["apikey"] = key
+    config["plugins"] = plugin_list
     plugins.load_plugins()
     # Quiet beets' own logging so our run output stays readable.
     logging.getLogger("beets").setLevel(logging.WARNING)
     _beets_ready = True
 
 
+# Disc subfolders like "CD1", "CD 2", "Disc 3", "Disk1" — merged into the parent
+# album so a multi-disc release is matched as one release, not per-disc fragments.
+_DISC_RE = re.compile(r"^(cd|disc|disk|disco)\s*0*\d+$", re.IGNORECASE)
+
+
+def _album_root(folder: Path) -> Path:
+    return folder.parent if _DISC_RE.match(folder.name) else folder
+
+
 def cluster_albums(root: str) -> dict[Path, list[Path]]:
-    """Group supported audio files by their containing folder (= album)."""
+    """Group supported audio files by album. Files in CD1/CD2/Disc-N subfolders are
+    merged into their parent so multi-disc releases cluster as a single album."""
     by_dir: dict[Path, list[Path]] = {}
     for p in Path(root).rglob("*"):
         if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS:
-            by_dir.setdefault(p.parent, []).append(p)
+            by_dir.setdefault(_album_root(p.parent), []).append(p)
     return {d: sorted(files) for d, files in sorted(by_dir.items())}
 
 

@@ -29,7 +29,7 @@ import signal
 from pathlib import Path
 from datetime import datetime
 
-from .tags import read_existing_tags, write_tags, restore_tags, diff_tags
+from .tags import read_existing_tags, write_tags, restore_tags, diff_tags, CHECKED_FIELDS
 from .store import Store
 from . import matcher
 from . import verify
@@ -152,8 +152,18 @@ def _decide(proposal: dict, folder: str, store: Store, client, model: str,
     return out
 
 
+def _apply_field_filter(proposed: dict, only: set | None, skip: set | None) -> dict:
+    """Restrict which tag fields a run will touch (governs both report and writes)."""
+    if only:
+        return {k: v for k, v in proposed.items() if k in only}
+    if skip:
+        return {k: v for k, v in proposed.items() if k not in skip}
+    return proposed
+
+
 def _build_result(folder: str, key: str, proposal: dict, decision: dict,
-                  lookup_cached: bool) -> dict:
+                  lookup_cached: bool, only_fields: set | None = None,
+                  skip_fields: set | None = None, fill_only: bool = False) -> dict:
     cands = proposal["candidates"]
     idx = decision["chosen_index"]
     chosen = cands[idx] if idx is not None else None
@@ -162,6 +172,9 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
     n_changed = 0
     for path, cur in proposal["current"].items():
         proposed = chosen["per_file"].get(path, {}) if chosen else {}
+        proposed = _apply_field_filter(proposed, only_fields, skip_fields)
+        if fill_only:  # only fill blanks; never overwrite an existing value
+            proposed = {k: v for k, v in proposed.items() if not cur.get(k)}
         changed = diff_tags(cur, proposed) if proposed else []
         if changed:
             n_changed += 1
@@ -191,7 +204,9 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
 
 
 def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: str,
-        confidence: int, use_cache: bool, eval_only: bool, fingerprint: bool = False) -> None:
+        confidence: int, use_cache: bool, eval_only: bool, fingerprint: bool = False,
+        only_fields: set | None = None, skip_fields: set | None = None,
+        fill_only: bool = False) -> None:
     matcher.init_beets(fingerprint=fingerprint)
     store = Store(db_path)
     client = None  # created lazily on first Claude call
@@ -209,6 +224,12 @@ def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: 
              + (f" (--limit {limit})" if limit else ""))
     if fingerprint:
         log.info("FINGERPRINT pass — re-matching no-match albums via AcoustID (chroma)")
+    if only_fields:
+        log.info(f"FIELD FILTER — only writing: {', '.join(sorted(only_fields))}")
+    elif skip_fields:
+        log.info(f"FIELD FILTER — skipping: {', '.join(sorted(skip_fields))}")
+    if fill_only:
+        log.info("FILL-ONLY — only filling empty tags; never overwriting existing values")
     log.info("DRY RUN — no files will be modified" if not apply else f"APPLY — run_id={run_id}")
     log.info("─" * 64)
 
@@ -243,7 +264,9 @@ def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: 
         log.info(f"    {proposal['recommendation']:<7} -> {decision['action']}"
                  + (f"  (conf {decision['confidence']})" if decision["confidence"] is not None else ""))
 
-        result = _build_result(str(folder), key, proposal, decision, lookup_cached)
+        result = _build_result(str(folder), key, proposal, decision, lookup_cached,
+                               only_fields=only_fields, skip_fields=skip_fields,
+                               fill_only=fill_only)
 
         if apply and result["chosen"] and (decision["confidence"] or 0) >= confidence:
             _apply_writes(result, store, run_id, confidence)
@@ -377,6 +400,12 @@ def main() -> None:
     p.add_argument("--db", default=DB_DEFAULT, help=f"SQLite cache/journal path (default {DB_DEFAULT})")
     p.add_argument("--confidence", type=int, default=70, metavar="N",
                    help="Min Claude confidence to write on --apply (default 70)")
+    p.add_argument("--only-fields", metavar="F1,F2",
+                   help=f"Only write/propose these fields (comma-separated). Choices: {','.join(CHECKED_FIELDS)}")
+    p.add_argument("--skip-fields", metavar="F1,F2",
+                   help="Write/propose all fields EXCEPT these (comma-separated)")
+    p.add_argument("--fill-only", action="store_true",
+                   help="Only fill empty tags; never overwrite a value that's already set")
     p.add_argument("--no-cache", action="store_true", help="Ignore cached lookups/verdicts")
     p.add_argument("--eval-only", action="store_true", help="Skip Claude; only show strong matches")
     p.add_argument("--fingerprint", action="store_true",
@@ -403,6 +432,19 @@ def main() -> None:
     if not args.directory or not Path(args.directory).is_dir():
         p.error("a valid directory is required (or use --list-runs / --undo)")
 
+    if args.only_fields and args.skip_fields:
+        p.error("use only one of --only-fields / --skip-fields")
+
+    def _parse_fields(raw):
+        fields = {f.strip() for f in raw.split(",") if f.strip()}
+        bad = fields - set(CHECKED_FIELDS)
+        if bad:
+            p.error(f"unknown field(s): {', '.join(sorted(bad))}. Valid: {', '.join(CHECKED_FIELDS)}")
+        return fields
+
+    only_fields = _parse_fields(args.only_fields) if args.only_fields else None
+    skip_fields = _parse_fields(args.skip_fields) if args.skip_fields else None
+
     if not args.eval_only and not os.environ.get("ANTHROPIC_API_KEY"):
         log.warning("ANTHROPIC_API_KEY not set — low/medium albums can't be verified. "
                     "Running with --eval-only behavior for this session.")
@@ -421,7 +463,8 @@ def main() -> None:
 
     run(args.directory, apply=args.apply, limit=args.limit, model=args.model,
         db_path=args.db, confidence=args.confidence,
-        use_cache=not args.no_cache, eval_only=args.eval_only, fingerprint=args.fingerprint)
+        use_cache=not args.no_cache, eval_only=args.eval_only, fingerprint=args.fingerprint,
+        only_fields=only_fields, skip_fields=skip_fields, fill_only=args.fill_only)
 
 
 if __name__ == "__main__":

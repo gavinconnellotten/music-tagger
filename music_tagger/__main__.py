@@ -10,6 +10,10 @@ Pipeline:
   4. Dry-run by default: writes a current-vs-proposed report, no file changes.
      --apply writes tags and journals originals for `--undo <run-id>`.
 
+Dates are fill-empty-only by default: an existing date is never overwritten
+(the matched release is often a reissue, whose year would clobber the original);
+blank dates are still filled.
+
 Usage:
   python -m music_tagger <dir>                 # dry run + report
   python -m music_tagger <dir> --limit 5       # first 5 albums
@@ -173,6 +177,12 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
     for path, cur in proposal["current"].items():
         proposed = chosen["per_file"].get(path, {}) if chosen else {}
         proposed = _apply_field_filter(proposed, only_fields, skip_fields)
+        # Always fill-empty-only for `date`: the matched MusicBrainz release is
+        # frequently a reissue/remaster, so its year would overwrite a correct
+        # original-release year. Existing dates are left untouched; blanks are
+        # still filled. (See the reissue-date issue in project notes.)
+        if cur.get("date"):
+            proposed = {k: v for k, v in proposed.items() if k != "date"}
         if fill_only:  # only fill blanks; never overwrite an existing value
             proposed = {k: v for k, v in proposed.items() if not cur.get(k)}
         changed = diff_tags(cur, proposed) if proposed else []

@@ -14,9 +14,12 @@ Dates are fill-empty-only by default: an existing date is never overwritten
 (the matched release is often a reissue, whose year would clobber the original);
 blank dates are still filled.
 
-Albumartist is normalized to the primary artist by default: a trailing
-"feat./ft./featuring …" guest credit is stripped (so players that split
-albumartist, e.g. Music Assistant, don't spawn a separate entry per guest).
+Albumartist is normalized to the primary artist by default (so players that
+split albumartist, e.g. Music Assistant, don't spawn a separate entry per
+collaborator): a trailing "feat./ft./featuring …" guest credit is stripped,
+and a joint credit ("X & Y") is reduced to whichever name matches the artist
+folder the album is filed under. ";" (proper multi-value, e.g. classical
+"Composer; Performer") is left intact.
 
 Usage:
   python -m music_tagger <dir>                 # dry run + report
@@ -37,7 +40,8 @@ import signal
 from pathlib import Path
 from datetime import datetime
 
-from .tags import read_existing_tags, write_tags, restore_tags, diff_tags, primary_artist, CHECKED_FIELDS
+from .tags import (read_existing_tags, write_tags, restore_tags, diff_tags,
+                   primary_artist, primary_from_context, CHECKED_FIELDS)
 from .store import Store
 from . import matcher
 from . import verify
@@ -169,12 +173,28 @@ def _apply_field_filter(proposed: dict, only: set | None, skip: set | None) -> d
     return proposed
 
 
+def _artist_folder_name(folder: str, root: str | None) -> str:
+    """The artist folder an album is filed under = the first path segment below the
+    scan root (libraries are organized one folder per primary artist). Falls back to
+    the album folder's own name when that can't be determined."""
+    if root:
+        try:
+            rel = Path(folder).resolve().relative_to(Path(root).resolve())
+            if rel.parts:
+                return rel.parts[0]
+        except ValueError:
+            pass
+    return Path(folder).name
+
+
 def _build_result(folder: str, key: str, proposal: dict, decision: dict,
-                  lookup_cached: bool, only_fields: set | None = None,
+                  lookup_cached: bool, root: str | None = None,
+                  only_fields: set | None = None,
                   skip_fields: set | None = None, fill_only: bool = False) -> dict:
     cands = proposal["candidates"]
     idx = decision["chosen_index"]
     chosen = cands[idx] if idx is not None else None
+    artist_folder = _artist_folder_name(folder, root)
 
     files = []
     n_changed = 0
@@ -187,11 +207,15 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
         # still filled. (See the reissue-date issue in project notes.)
         if cur.get("date"):
             proposed = {k: v for k, v in proposed.items() if k != "date"}
-        # Normalize albumartist to the primary artist (strip a trailing
-        # "feat./ft./featuring …" guest credit) so players that split albumartist
-        # — e.g. Music Assistant — don't spawn a separate entry per guest.
+        # Normalize albumartist so players that split it (e.g. Music Assistant)
+        # don't spawn a separate entry per collaborator:
+        #   1. strip a trailing "feat./ft./featuring …" guest credit;
+        #   2. for a joint credit ("X & Y"), reduce to whichever name matches the
+        #      artist folder the album is filed under (the library's primary artist).
         if proposed.get("albumartist"):
-            proposed = {**proposed, "albumartist": primary_artist(proposed["albumartist"])}
+            aa = primary_artist(proposed["albumartist"])
+            aa = primary_from_context(aa, artist_folder)
+            proposed = {**proposed, "albumartist": aa}
         if fill_only:  # only fill blanks; never overwrite an existing value
             proposed = {k: v for k, v in proposed.items() if not cur.get(k)}
         changed = diff_tags(cur, proposed) if proposed else []
@@ -284,8 +308,8 @@ def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: 
                  + (f"  (conf {decision['confidence']})" if decision["confidence"] is not None else ""))
 
         result = _build_result(str(folder), key, proposal, decision, lookup_cached,
-                               only_fields=only_fields, skip_fields=skip_fields,
-                               fill_only=fill_only)
+                               root=directory, only_fields=only_fields,
+                               skip_fields=skip_fields, fill_only=fill_only)
 
         if apply and result["chosen"] and (decision["confidence"] or 0) >= confidence:
             _apply_writes(result, store, run_id, confidence)

@@ -146,6 +146,35 @@ def primary_artist(value: str) -> str:
     return _FEATURING_RE.sub("", value).strip()
 
 
+# Joins that denote multiple distinct artists in one albumartist string. ";" is
+# deliberately EXCLUDED: it's the proper multi-value separator (e.g. classical
+# "Composer; Performer") and must be left intact.
+_MULTIARTIST_RE = re.compile(r"\s+&\s+|\s+and\s+|\s+with\s+|\s*/\s*|\s*,\s*", re.IGNORECASE)
+
+
+def primary_from_context(albumartist: str, context: str) -> str:
+    """Reduce a multi-artist albumartist to the single credited name that matches
+    `context` — the name of the artist folder the album is filed under, i.e. the
+    artist the *library* treats as primary. This steers joint credits like
+    "Elvis Costello & Allen Toussaint" (filed under Elvis Costello) down to the
+    lead, so players that split albumartist don't list the collaborator separately.
+
+    Returns the value UNCHANGED when we can't be confident:
+      - not a multi-artist credit, or it uses ';' (proper multi-value), or
+      - zero credited names match the folder (e.g. a soundtrack or a mistag), or
+      - several match (e.g. "Simon & Garfunkel" under a "Simon & Garfunkel" folder —
+        a band name, not a collaboration).
+    Word order is irrelevant: folder context, not position, picks the lead."""
+    if not albumartist or ";" in albumartist:
+        return albumartist
+    names = [n.strip() for n in _MULTIARTIST_RE.split(albumartist) if n.strip()]
+    if len(names) < 2:
+        return albumartist
+    ctx = _normalize(context)
+    matched = [n for n in names if _normalize(n) and _normalize(n) in ctx]
+    return matched[0] if len(matched) == 1 else albumartist
+
+
 def diff_tags(current: dict, proposed: dict) -> list[str]:
     """Fields where the proposal is non-empty and meaningfully differs from current.
 

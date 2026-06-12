@@ -131,6 +131,21 @@ def _year(value) -> str:
     return m.group(0) if m else ""
 
 
+# A trailing "feat./ft./featuring <guest>" credit on an *album* artist. Only these
+# explicit guest markers are stripped — NOT "&" / "/" / "with", which often denote
+# genuine duos or aliases (e.g. "MF DOOM & MF Grimm", "Viktor Vaughn / MF DOOM").
+_FEATURING_RE = re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", re.IGNORECASE)
+
+
+def primary_artist(value: str) -> str:
+    """Strip a trailing 'feat./ft./featuring …' guest credit, leaving the primary
+    artist. Keeps album-artist tags from spawning guest entries in players that
+    split albumartist on featuring credits (e.g. Music Assistant)."""
+    if not value:
+        return value
+    return _FEATURING_RE.sub("", value).strip()
+
+
 def diff_tags(current: dict, proposed: dict) -> list[str]:
     """Fields where the proposal is non-empty and meaningfully differs from current.
 

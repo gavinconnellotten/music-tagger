@@ -14,6 +14,10 @@ Dates are fill-empty-only by default: an existing date is never overwritten
 (the matched release is often a reissue, whose year would clobber the original);
 blank dates are still filled.
 
+Albumartist is normalized to the primary artist by default: a trailing
+"feat./ft./featuring …" guest credit is stripped (so players that split
+albumartist, e.g. Music Assistant, don't spawn a separate entry per guest).
+
 Usage:
   python -m music_tagger <dir>                 # dry run + report
   python -m music_tagger <dir> --limit 5       # first 5 albums
@@ -33,7 +37,7 @@ import signal
 from pathlib import Path
 from datetime import datetime
 
-from .tags import read_existing_tags, write_tags, restore_tags, diff_tags, CHECKED_FIELDS
+from .tags import read_existing_tags, write_tags, restore_tags, diff_tags, primary_artist, CHECKED_FIELDS
 from .store import Store
 from . import matcher
 from . import verify
@@ -183,6 +187,11 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
         # still filled. (See the reissue-date issue in project notes.)
         if cur.get("date"):
             proposed = {k: v for k, v in proposed.items() if k != "date"}
+        # Normalize albumartist to the primary artist (strip a trailing
+        # "feat./ft./featuring …" guest credit) so players that split albumartist
+        # — e.g. Music Assistant — don't spawn a separate entry per guest.
+        if proposed.get("albumartist"):
+            proposed = {**proposed, "albumartist": primary_artist(proposed["albumartist"])}
         if fill_only:  # only fill blanks; never overwrite an existing value
             proposed = {k: v for k, v in proposed.items() if not cur.get(k)}
         changed = diff_tags(cur, proposed) if proposed else []

@@ -17,19 +17,22 @@ CHECKED_FIELDS = [
     "tracknumber", "date", "genre", "discnumber",
 ]
 
-# Reserved (non-text) keys carrying MusicBrainz artist IDs as a LIST. Players like
-# Music Assistant trust these IDs over the artist/albumartist text and re-expand
-# collaborators from them, so when we reduce a credit we must reduce its ID list to
-# match. Handled specially by read/write/restore/diff; deliberately NOT in
-# CHECKED_FIELDS (values are lists, not strings). Each maps to (ID3 TXXX desc, FLAC key).
+# Reserved LIST-valued keys (values are lists, so NOT in CHECKED_FIELDS). Players
+# like Music Assistant trust these over the artist/albumartist display text and
+# re-expand collaborators from them, so when we reduce a credit we reduce these too:
+#   - the MusicBrainz artist-ID lists (MA prefers the ID count), and
+#   - the Picard-style multi-value ARTISTS / ALBUMARTISTS name lists.
+# Each maps to (ID3 TXXX desc, FLAC key, diff label). Handled by read/write/restore/diff.
 MB_ALBUMARTIST_ID = "musicbrainz_albumartistid"
 MB_ARTIST_ID = "musicbrainz_artistid"
-_MB_ID_FRAMES = {
-    MB_ALBUMARTIST_ID: ("MusicBrainz Album Artist Id", "musicbrainz_albumartistid"),
-    MB_ARTIST_ID: ("MusicBrainz Artist Id", "musicbrainz_artistid"),
+ARTISTS_TAG = "_artists_tag"
+ALBUMARTISTS_TAG = "_albumartists_tag"
+_LIST_FRAMES = {
+    MB_ALBUMARTIST_ID: ("MusicBrainz Album Artist Id", "musicbrainz_albumartistid", "albumartist_id"),
+    MB_ARTIST_ID:      ("MusicBrainz Artist Id", "musicbrainz_artistid", "artist_id"),
+    ALBUMARTISTS_TAG:  ("ALBUMARTISTS", "albumartists", "albumartists"),
+    ARTISTS_TAG:       ("ARTISTS", "artists", "artists"),
 }
-# The text field each ID list belongs to (drives the diff label + change trigger).
-_MB_ID_OWNER = {MB_ALBUMARTIST_ID: "albumartist", MB_ARTIST_ID: "artist"}
 
 _ID3_READ = {
     "TIT2": "title", "TPE1": "artist", "TALB": "album", "TPE2": "albumartist",
@@ -57,7 +60,7 @@ def read_existing_tags(filepath: str) -> dict:
                 val = audio.get(frame)
                 if val:
                     tags[key] = str(val)
-            for key, (desc, _) in _MB_ID_FRAMES.items():
+            for key, (desc, _, _) in _LIST_FRAMES.items():
                 fr = audio.get(f"TXXX:{desc}")
                 if fr is not None and list(fr.text):
                     tags[key] = list(fr.text)
@@ -67,7 +70,7 @@ def read_existing_tags(filepath: str) -> dict:
                 val = audio.get(key)
                 if val:
                     tags[key] = val[0]
-            for key, (_, fkey) in _MB_ID_FRAMES.items():
+            for key, (_, fkey, _) in _LIST_FRAMES.items():
                 vals = audio.get(fkey)
                 if vals:
                     tags[key] = list(vals)
@@ -76,21 +79,21 @@ def read_existing_tags(filepath: str) -> dict:
     return tags
 
 
-def _apply_mb_ids(audio, ext: str, source: dict) -> None:
-    """Write/clear the MusicBrainz-ID frames present (as keys) in `source`.
+def _apply_list_frames(audio, ext: str, source: dict) -> None:
+    """Write/clear the reserved list-valued frames present (as keys) in `source`.
     A present key with a non-empty list sets the frame; an empty list clears it."""
-    for key, (desc, fkey) in _MB_ID_FRAMES.items():
+    for key, (desc, fkey, _) in _LIST_FRAMES.items():
         if key not in source:
             continue
-        ids = [i for i in (source.get(key) or []) if i]
+        vals = [v for v in (source.get(key) or []) if v]
         if ext == ".mp3":
-            if ids:
-                audio[f"TXXX:{desc}"] = TXXX(encoding=3, desc=desc, text=ids)
+            if vals:
+                audio[f"TXXX:{desc}"] = TXXX(encoding=3, desc=desc, text=vals)
             else:
                 audio.delall(f"TXXX:{desc}")
         else:
-            if ids:
-                audio[fkey] = ids
+            if vals:
+                audio[fkey] = vals
             elif fkey in audio:
                 del audio[fkey]
 
@@ -98,12 +101,12 @@ def _apply_mb_ids(audio, ext: str, source: dict) -> None:
 def write_tags(filepath: str, tags: dict) -> bool:
     """Write the given {field: value} tags to the file. Returns True on success.
 
-    A `MB_ALBUMARTIST_ID` / `MB_ARTIST_ID` entry (a list of IDs) is written to the
-    matching MusicBrainz-ID frame; an empty list clears it.
+    Reserved list-valued entries (MusicBrainz-ID and ARTISTS/ALBUMARTISTS frames)
+    are written to their matching frame; an empty list clears it.
     """
     ext = Path(filepath).suffix.lower()
     clean = {k: str(v) for k, v in tags.items()
-             if k not in _MB_ID_FRAMES and v not in (None, "")}
+             if k not in _LIST_FRAMES and v not in (None, "")}
     try:
         if ext == ".mp3":
             try:
@@ -113,14 +116,14 @@ def write_tags(filepath: str, tags: dict) -> bool:
             for key, Frame in _ID3_WRITE.items():
                 if clean.get(key):
                     audio[Frame.__name__] = Frame(encoding=3, text=clean[key])
-            _apply_mb_ids(audio, ext, tags)
+            _apply_list_frames(audio, ext, tags)
             audio.save(filepath)
         elif ext == ".flac":
             audio = FLAC(filepath)
             for key in _FLAC_FIELDS:
                 if clean.get(key):
                     audio[key] = clean[key]
-            _apply_mb_ids(audio, ext, tags)
+            _apply_list_frames(audio, ext, tags)
             audio.save()
         else:
             return False
@@ -138,7 +141,7 @@ def restore_tags(filepath: str, original: dict) -> bool:
     try:
         # MusicBrainz-ID frames are restored only if the snapshot recorded the key
         # (snapshots from runs predating these keys won't have them — leave those
-        # frames untouched rather than wrongly deleting them). _apply_mb_ids keys
+        # frames untouched rather than wrongly deleting them). _apply_list_frames keys
         # off presence in `original`, giving exactly that behaviour.
         if ext == ".mp3":
             try:
@@ -151,7 +154,7 @@ def restore_tags(filepath: str, original: dict) -> bool:
                     audio[frame_name] = Frame(encoding=3, text=str(original[field]))
                 else:
                     audio.delall(frame_name)
-            _apply_mb_ids(audio, ext, original)
+            _apply_list_frames(audio, ext, original)
             audio.save(filepath)
         elif ext == ".flac":
             audio = FLAC(filepath)
@@ -160,7 +163,7 @@ def restore_tags(filepath: str, original: dict) -> bool:
                     audio[field] = str(original[field])
                 elif field in audio:
                     del audio[field]
-            _apply_mb_ids(audio, ext, original)
+            _apply_list_frames(audio, ext, original)
             audio.save()
         else:
             return False
@@ -288,8 +291,9 @@ def diff_tags(current: dict, proposed: dict) -> list[str]:
                 changed.append(field)
         elif _normalize(current.get(field)) != _normalize(prop):
             changed.append(field)
-    # MusicBrainz artist-ID lists — only when the proposal specifies them.
-    for key, owner in _MB_ID_OWNER.items():
+    # Reserved list-valued frames (MB IDs, ARTISTS/ALBUMARTISTS) — only when the
+    # proposal specifies them.
+    for key, (_, _, label) in _LIST_FRAMES.items():
         if key in proposed and list(proposed.get(key) or []) != list(current.get(key) or []):
-            changed.append(f"{owner}_id")
+            changed.append(label)
     return changed

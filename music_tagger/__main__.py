@@ -45,7 +45,8 @@ from pathlib import Path
 from datetime import datetime
 
 from .tags import (read_existing_tags, write_tags, restore_tags, diff_tags,
-                   reduce_credit, MB_ALBUMARTIST_ID, MB_ARTIST_ID, CHECKED_FIELDS)
+                   reduce_credit, MB_ALBUMARTIST_ID, MB_ARTIST_ID,
+                   ARTISTS_TAG, ALBUMARTISTS_TAG, CHECKED_FIELDS)
 from .store import Store
 from . import matcher
 from . import verify
@@ -218,21 +219,27 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
         # artist (per-track entities); each reduced credit's MusicBrainz-ID list is
         # reduced too, since players trust those IDs over the text.
         if proposed.get("albumartist"):
+            orig_aa = proposed["albumartist"]
             new_aa, aa_ids = reduce_credit(
-                proposed["albumartist"], artist_folder,
+                orig_aa, artist_folder,
                 chosen.get("albumartists") if chosen else None,
                 chosen.get("albumartist_ids") if chosen else None)
             proposed = {**proposed, "albumartist": new_aa}
             if aa_ids is not None:
                 proposed[MB_ALBUMARTIST_ID] = aa_ids
+            if new_aa != orig_aa:  # also collapse the multi-value ALBUMARTISTS tag
+                proposed[ALBUMARTISTS_TAG] = [new_aa]
         if proposed.get("artist"):
+            orig_ar = proposed["artist"]
             cr = (chosen.get("per_file_credits") or {}).get(path, {}) if chosen else {}
             new_ar, ar_ids = reduce_credit(
-                proposed["artist"], artist_folder,
+                orig_ar, artist_folder,
                 cr.get("artist_names"), cr.get("artist_ids"))
             proposed = {**proposed, "artist": new_ar}
             if ar_ids is not None:
                 proposed[MB_ARTIST_ID] = ar_ids
+            if new_ar != orig_ar:  # also collapse the multi-value ARTISTS tag
+                proposed[ARTISTS_TAG] = [new_ar]
         if fill_only:  # only fill blanks; never overwrite an existing value
             proposed = {k: v for k, v in proposed.items() if not cur.get(k)}
         changed = diff_tags(cur, proposed) if proposed else []

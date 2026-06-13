@@ -255,24 +255,47 @@ def reduce_credit(text: str, context: str, names, ids) -> tuple:
         return text, None
     ctx = _normalize(context)
     names, ids = list(names or []), list(ids or [])
-    # Multi-entity collaboration: keep the entity the folder is named after (+ its ID).
+
+    def _id_at(k):
+        return ids[k] if k < len(ids) and ids[k] else None
+
+    # Multi-entity collaboration.
     if len(names) >= 2:
+        # Prefer the entity the folder is named after (+ its ID).
         matched = [k for k, n in enumerate(names) if _normalize(n) and ctx.startswith(_normalize(n))]
         if len(matched) == 1:
             k = matched[0]
-            kept_id = ids[k] if k < len(ids) else None
-            return names[k], ([kept_id] if kept_id else [])
+            return names[k], ([_id_at(k)] if _id_at(k) else [])
+        # No folder steer: if the text is a SINGLE artist that names exactly one of
+        # the entities, keep the text but reduce the IDs to that entity — drops
+        # feat-only-in-ID guests (e.g. "De Staat" with [De Staat, Luwten] IDs on a
+        # comp). Requires the text to be one artist (no separators) so a genuine
+        # multi-artist mix string ("A / B / C") is left intact.
+        single_text = len([p for p in _SEP_RE.split(text) if p.strip()]) == 1
+        tn = _normalize(text)
+        exact = [k for k, n in enumerate(names) if _normalize(n) == tn] if single_text else []
+        if len(exact) == 1:
+            return text, ([_id_at(exact[0])] if _id_at(exact[0]) else [])
         return text, None
-    # Single entity (band phrase) or no entity data: keep if the folder is named after
-    # the whole credit; else flatten to the one part the folder is named after.
+    # Single entity, or no entity data. With one entity, use its canonical name and
+    # its ID (aligning a stale single ID). Either way the name may STILL be a band
+    # phrase ("Elvis Costello & The Attractions") that the folder-flatten must handle.
+    have_entity = len(names) == 1
+    if have_entity:
+        text = names[0]
+    nid = _id_at(0) if have_entity else None
     if not text or ctx.startswith(_normalize(text)):
-        return text, None
+        # folder is named after the whole credit (band name / single artist) -> keep;
+        # align the ID when we have the entity's, else leave the ID frame alone.
+        return text, ([nid] if nid else None)
     parts = [p.strip() for p in _SEP_RE.split(text) if p.strip()]
     if len(parts) >= 2:
         matched = [p for p in parts if _normalize(p) and ctx.startswith(_normalize(p))]
         if len(matched) == 1:
-            return matched[0], None
-    return text, None
+            # flattened a band phrase to a sub-artist: the entity ID is the band's,
+            # not the sub-artist's, so clear it (when we had one) for name-matching.
+            return matched[0], ([] if have_entity else None)
+    return text, ([nid] if nid else None)
 
 
 def diff_tags(current: dict, proposed: dict) -> list[str]:

@@ -178,18 +178,26 @@ def _apply_field_filter(proposed: dict, only: set | None, skip: set | None) -> d
     return proposed
 
 
+# A leading "(YYYY)" / "[YYYY]" / bare year (+ separators) some folders prefix the
+# artist with, e.g. "[1998] Queens of the Stone Age & Beaver [Split EP]".
+_LEADING_YEAR_RE = re.compile(r"^[\[(]?\s*\d{4}\s*[\])]?\s*[-–—]?\s*")
+
+
 def _artist_folder_name(folder: str, root: str | None) -> str:
     """The artist folder an album is filed under = the first path segment below the
     scan root (libraries are organized one folder per primary artist). Falls back to
-    the album folder's own name when that can't be determined."""
+    the album folder's own name when that can't be determined. A leading year/bracket
+    tag is stripped so it doesn't defeat the folder-prefix match."""
+    seg = None
     if root:
         try:
             rel = Path(folder).resolve().relative_to(Path(root).resolve())
             if rel.parts:
-                return rel.parts[0]
+                seg = rel.parts[0]
         except ValueError:
             pass
-    return Path(folder).name
+    seg = seg if seg is not None else Path(folder).name
+    return _LEADING_YEAR_RE.sub("", seg) or seg
 
 
 def _build_result(folder: str, key: str, proposal: dict, decision: dict,
@@ -225,7 +233,10 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
                 chosen.get("albumartists") if chosen else None,
                 chosen.get("albumartist_ids") if chosen else None)
             proposed = {**proposed, "albumartist": new_aa}
-            if aa_ids is not None:
+            # Correct/reduce an EXISTING album-artist ID list only — never create one
+            # where the file has none (avoids a library-wide MBID rewrite).
+            cur_aa_ids = cur.get(MB_ALBUMARTIST_ID)
+            if aa_ids is not None and cur_aa_ids and list(cur_aa_ids) != list(aa_ids):
                 proposed[MB_ALBUMARTIST_ID] = aa_ids
             if new_aa != orig_aa:  # also collapse the multi-value ALBUMARTISTS tag
                 proposed[ALBUMARTISTS_TAG] = [new_aa]
@@ -236,7 +247,8 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
                 orig_ar, artist_folder,
                 cr.get("artist_names"), cr.get("artist_ids"))
             proposed = {**proposed, "artist": new_ar}
-            if ar_ids is not None:
+            cur_ar_ids = cur.get(MB_ARTIST_ID)
+            if ar_ids is not None and cur_ar_ids and list(cur_ar_ids) != list(ar_ids):
                 proposed[MB_ARTIST_ID] = ar_ids
             if new_ar != orig_ar:  # also collapse the multi-value ARTISTS tag
                 proposed[ARTISTS_TAG] = [new_ar]

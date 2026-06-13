@@ -168,8 +168,16 @@ def match_album(files: list[Path]) -> dict:
     candidates = []
     for m in proposal.candidates[:_MAX_CANDIDATES]:
         per_file = {}
+        per_file_credits = {}
         for it, ti in m.mapping.items():
-            per_file[item_path(it)] = _trackinfo_to_tags(ti, m.info)
+            path = item_path(it)
+            per_file[path] = _trackinfo_to_tags(ti, m.info)
+            # Parallel per-track artist names + MusicBrainz IDs (same order), so a
+            # reduced `artist` can keep exactly the matching ID.
+            per_file_credits[path] = {
+                "artist_names": list(_g(ti, "artists") or []),
+                "artist_ids": list(_g(ti, "artists_ids") or []),
+            }
         candidates.append({
             "distance": round(float(m.distance), 4),
             "album": _g(m.info, "album"),
@@ -186,6 +194,7 @@ def match_album(files: list[Path]) -> dict:
             "extra_items": len(m.extra_items),
             "extra_tracks": len(m.extra_tracks),
             "per_file": per_file,
+            "per_file_credits": per_file_credits,
         })
 
     return {

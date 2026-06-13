@@ -14,15 +14,16 @@ Dates are fill-empty-only by default: an existing date is never overwritten
 (the matched release is often a reissue, whose year would clobber the original);
 blank dates are still filled.
 
-Albumartist is normalized to the primary artist by default (so players that
-split albumartist, e.g. Music Assistant, don't spawn a separate entry per
-collaborator): a trailing "feat./ft./featuring …" guest credit is stripped,
-and a joint credit ("X & Y") is reduced to whichever name matches the artist
-folder the album is filed under. ";" (proper multi-value, e.g. classical
-"Composer; Performer") is left intact. When the credit is reduced, the
-album-artist MusicBrainz-ID list is reduced to the kept artist's ID too —
-players trust those IDs over the text and would otherwise re-expand the
-collaborators (undo journals/restores the original IDs).
+Both `albumartist` and the per-track `artist` are normalized to the primary
+artist by default (players like Music Assistant index both and split them,
+spawning a separate entry per collaborator): a trailing "feat./ft./featuring …"
+guest credit is stripped; a joint credit ("X & Y") is reduced to whichever name
+matches the artist folder the album is filed under; and a ";"-joined credit
+(MusicBrainz "primary first", e.g. classical "Composer; Performer") is reduced
+to the first name (keeps the composer, drops the performer). When a credit is
+reduced, its MusicBrainz-ID list (album-artist / artist) is reduced to the kept
+artist's ID too — players trust those IDs over the text and would otherwise
+re-expand the collaborators. Undo journals/restores the original IDs.
 
 Usage:
   python -m music_tagger <dir>                 # dry run + report
@@ -44,8 +45,7 @@ from pathlib import Path
 from datetime import datetime
 
 from .tags import (read_existing_tags, write_tags, restore_tags, diff_tags,
-                   primary_artist, primary_from_context, album_artist_id_for,
-                   MB_ALBUMARTIST_ID, CHECKED_FIELDS)
+                   reduce_credit, MB_ALBUMARTIST_ID, MB_ARTIST_ID, CHECKED_FIELDS)
 from .store import Store
 from . import matcher
 from . import verify
@@ -211,23 +211,28 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
         # still filled. (See the reissue-date issue in project notes.)
         if cur.get("date"):
             proposed = {k: v for k, v in proposed.items() if k != "date"}
-        # Normalize albumartist so players that split it (e.g. Music Assistant)
-        # don't spawn a separate entry per collaborator:
-        #   1. strip a trailing "feat./ft./featuring …" guest credit;
-        #   2. for a joint credit ("X & Y"), reduce to whichever name matches the
-        #      artist folder the album is filed under (the library's primary artist).
-        # When the credit is reduced, also reduce the album-artist MusicBrainz-ID
-        # list to the kept artist's single ID — players trust those IDs over the
-        # text and would otherwise re-expand the collaborators from them.
+        # Reduce joint credits to the library's primary artist so players that split
+        # artist/albumartist (e.g. Music Assistant) don't spawn an entry per
+        # collaborator. Driven by beets' artist-ENTITY lists, so band names stay
+        # intact. Applied to BOTH albumartist (album-level entities) and the per-track
+        # artist (per-track entities); each reduced credit's MusicBrainz-ID list is
+        # reduced too, since players trust those IDs over the text.
         if proposed.get("albumartist"):
-            orig_aa = proposed["albumartist"]
-            aa = primary_from_context(primary_artist(orig_aa), artist_folder)
-            proposed = {**proposed, "albumartist": aa}
-            if aa != orig_aa and chosen:
-                ids = chosen.get("albumartist_ids") or []
-                if len(ids) > 1:
-                    kept = album_artist_id_for(aa, chosen.get("albumartists") or [], ids)
-                    proposed[MB_ALBUMARTIST_ID] = [kept] if kept else []
+            new_aa, aa_ids = reduce_credit(
+                proposed["albumartist"], artist_folder,
+                chosen.get("albumartists") if chosen else None,
+                chosen.get("albumartist_ids") if chosen else None)
+            proposed = {**proposed, "albumartist": new_aa}
+            if aa_ids is not None:
+                proposed[MB_ALBUMARTIST_ID] = aa_ids
+        if proposed.get("artist"):
+            cr = (chosen.get("per_file_credits") or {}).get(path, {}) if chosen else {}
+            new_ar, ar_ids = reduce_credit(
+                proposed["artist"], artist_folder,
+                cr.get("artist_names"), cr.get("artist_ids"))
+            proposed = {**proposed, "artist": new_ar}
+            if ar_ids is not None:
+                proposed[MB_ARTIST_ID] = ar_ids
         if fill_only:  # only fill blanks; never overwrite an existing value
             proposed = {k: v for k, v in proposed.items() if not cur.get(k)}
         changed = diff_tags(cur, proposed) if proposed else []

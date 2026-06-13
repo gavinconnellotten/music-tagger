@@ -200,10 +200,22 @@ def _artist_folder_name(folder: str, root: str | None) -> str:
     return _LEADING_YEAR_RE.sub("", seg) or seg
 
 
+def _forced_artist_tags(name: str) -> dict:
+    """Override that pins every artist-bearing tag to a single name and clears the
+    MusicBrainz IDs (so a player can't re-expand a stale credit from them). Used by
+    --force-artist to fix unmatched/mistagged albums the matcher can't help with."""
+    return {
+        "artist": name, "albumartist": name,
+        MB_ARTIST_ID: [], MB_ALBUMARTIST_ID: [],
+        ARTISTS_TAG: [name], ALBUMARTISTS_TAG: [name],
+    }
+
+
 def _build_result(folder: str, key: str, proposal: dict, decision: dict,
                   lookup_cached: bool, root: str | None = None,
                   only_fields: set | None = None,
-                  skip_fields: set | None = None, fill_only: bool = False) -> dict:
+                  skip_fields: set | None = None, fill_only: bool = False,
+                  force_artist: str | None = None) -> dict:
     cands = proposal["candidates"]
     idx = decision["chosen_index"]
     chosen = cands[idx] if idx is not None else None
@@ -212,6 +224,15 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
     files = []
     n_changed = 0
     for path, cur in proposal["current"].items():
+        if force_artist:
+            # Hard override: ignore the (often absent) match and pin the artist.
+            proposed = _forced_artist_tags(force_artist)
+            changed = diff_tags(cur, proposed)
+            if changed:
+                n_changed += 1
+            files.append({"path": path, "name": Path(path).name,
+                          "current": cur, "proposed": proposed, "changed": changed})
+            continue
         proposed = chosen["per_file"].get(path, {}) if chosen else {}
         proposed = _apply_field_filter(proposed, only_fields, skip_fields)
         # Always fill-empty-only for `date`: the matched MusicBrainz release is
@@ -285,7 +306,7 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
 def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: str,
         confidence: int, use_cache: bool, eval_only: bool, fingerprint: bool = False,
         only_fields: set | None = None, skip_fields: set | None = None,
-        fill_only: bool = False) -> None:
+        fill_only: bool = False, force_artist: str | None = None) -> None:
     matcher.init_beets(fingerprint=fingerprint)
     store = Store(db_path)
     client = None  # created lazily on first Claude call
@@ -309,6 +330,9 @@ def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: 
         log.info(f"FIELD FILTER — skipping: {', '.join(sorted(skip_fields))}")
     if fill_only:
         log.info("FILL-ONLY — only filling empty tags; never overwriting existing values")
+    if force_artist:
+        log.info(f"FORCE-ARTIST — pinning artist/albumartist to {force_artist!r} "
+                 f"(clears MB IDs); no MusicBrainz match used")
     log.info("DRY RUN — no files will be modified" if not apply else f"APPLY — run_id={run_id}")
     log.info("─" * 64)
 
@@ -318,36 +342,49 @@ def run(directory: str, *, apply: bool, limit: int | None, model: str, db_path: 
         key = matcher.album_key(files)
         log.info(f"[{i}/{len(folders)}] {Path(folder).name}  ({len(files)} files)")
 
-        proposal = store.get_lookup(key) if use_cache else None
-        # In fingerprint mode, re-attempt albums that previously got no tag match.
-        if proposal is not None and fingerprint and proposal.get("recommendation") == "none":
-            proposal = None
-        lookup_cached = proposal is not None
-        if proposal is None:
-            proposal = matcher.match_album(files)
-            # Don't cache transient errors — let them retry next run.
-            if proposal["recommendation"] != "error":
-                store.put_lookup(key, str(folder), proposal["recommendation"], proposal)
-        proposal["_album_key"] = key
-        if proposal.get("unreadable"):
-            log.info(f"    skipped {len(proposal['unreadable'])} unreadable file(s)")
+        if force_artist:
+            # Hard override mode: no MusicBrainz match needed — just read current tags.
+            proposal = {"current": {str(p): read_existing_tags(str(p)) for p in files},
+                        "candidates": [], "recommendation": "forced",
+                        "cur_artist": "", "cur_album": "", "_album_key": key}
+            decision = {"action": "forced", "chosen_index": None, "confidence": None,
+                        "reasoning": f"forced artist = {force_artist}", "claude_cached": False}
+            lookup_cached = False
+        else:
+            proposal = store.get_lookup(key) if use_cache else None
+            # In fingerprint mode, re-attempt albums that previously got no tag match.
+            if proposal is not None and fingerprint and proposal.get("recommendation") == "none":
+                proposal = None
+            lookup_cached = proposal is not None
+            if proposal is None:
+                proposal = matcher.match_album(files)
+                # Don't cache transient errors — let them retry next run.
+                if proposal["recommendation"] != "error":
+                    store.put_lookup(key, str(folder), proposal["recommendation"], proposal)
+            proposal["_album_key"] = key
+            if proposal.get("unreadable"):
+                log.info(f"    skipped {len(proposal['unreadable'])} unreadable file(s)")
 
-        if (client is None and not eval_only
-                and proposal["candidates"] and proposal["recommendation"] != "strong"):
-            import anthropic
-            client = anthropic.Anthropic()
+            if (client is None and not eval_only
+                    and proposal["candidates"] and proposal["recommendation"] != "strong"):
+                import anthropic
+                client = anthropic.Anthropic()
 
-        decision = _decide(proposal, str(folder), store, client, model, use_cache, eval_only)
-        if decision["action"] in ("claude_selected", "claude_rejected"):
-            claude_albums += 1
+            decision = _decide(proposal, str(folder), store, client, model, use_cache, eval_only)
+            if decision["action"] in ("claude_selected", "claude_rejected"):
+                claude_albums += 1
+
         log.info(f"    {proposal['recommendation']:<7} -> {decision['action']}"
                  + (f"  (conf {decision['confidence']})" if decision["confidence"] is not None else ""))
 
         result = _build_result(str(folder), key, proposal, decision, lookup_cached,
                                root=directory, only_fields=only_fields,
-                               skip_fields=skip_fields, fill_only=fill_only)
+                               skip_fields=skip_fields, fill_only=fill_only,
+                               force_artist=force_artist)
 
-        if apply and result["chosen"] and (decision["confidence"] or 0) >= confidence:
+        # Forced overrides apply on any change; matched albums gate on confidence.
+        if apply and (result["n_changed_files"] if force_artist
+                      else (result["chosen"] and (decision["confidence"] or 0) >= confidence)):
             _apply_writes(result, store, run_id, confidence)
 
         results.append(result)
@@ -485,6 +522,10 @@ def main() -> None:
                    help="Write/propose all fields EXCEPT these (comma-separated)")
     p.add_argument("--fill-only", action="store_true",
                    help="Only fill empty tags; never overwrite a value that's already set")
+    p.add_argument("--force-artist", metavar="NAME",
+                   help="Override: pin artist/albumartist to NAME and clear MusicBrainz IDs for "
+                        "every file under <directory> (no match needed). Scope it to ONE artist's "
+                        "folder — fixes unmatched/mistagged studio albums.")
     p.add_argument("--no-cache", action="store_true", help="Ignore cached lookups/verdicts")
     p.add_argument("--eval-only", action="store_true", help="Skip Claude; only show strong matches")
     p.add_argument("--fingerprint", action="store_true",
@@ -524,6 +565,9 @@ def main() -> None:
     only_fields = _parse_fields(args.only_fields) if args.only_fields else None
     skip_fields = _parse_fields(args.skip_fields) if args.skip_fields else None
 
+    # --force-artist needs no MusicBrainz/Claude; treat like eval-only for setup.
+    if args.force_artist and not args.eval_only:
+        args.eval_only = True
     if not args.eval_only and not os.environ.get("ANTHROPIC_API_KEY"):
         log.warning("ANTHROPIC_API_KEY not set — low/medium albums can't be verified. "
                     "Running with --eval-only behavior for this session.")
@@ -543,7 +587,8 @@ def main() -> None:
     run(args.directory, apply=args.apply, limit=args.limit, model=args.model,
         db_path=args.db, confidence=args.confidence,
         use_cache=not args.no_cache, eval_only=args.eval_only, fingerprint=args.fingerprint,
-        only_fields=only_fields, skip_fields=skip_fields, fill_only=args.fill_only)
+        only_fields=only_fields, skip_fields=skip_fields, fill_only=args.fill_only,
+        force_artist=args.force_artist)
 
 
 if __name__ == "__main__":

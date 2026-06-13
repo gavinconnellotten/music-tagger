@@ -19,7 +19,10 @@ split albumartist, e.g. Music Assistant, don't spawn a separate entry per
 collaborator): a trailing "feat./ft./featuring …" guest credit is stripped,
 and a joint credit ("X & Y") is reduced to whichever name matches the artist
 folder the album is filed under. ";" (proper multi-value, e.g. classical
-"Composer; Performer") is left intact.
+"Composer; Performer") is left intact. When the credit is reduced, the
+album-artist MusicBrainz-ID list is reduced to the kept artist's ID too —
+players trust those IDs over the text and would otherwise re-expand the
+collaborators (undo journals/restores the original IDs).
 
 Usage:
   python -m music_tagger <dir>                 # dry run + report
@@ -41,7 +44,8 @@ from pathlib import Path
 from datetime import datetime
 
 from .tags import (read_existing_tags, write_tags, restore_tags, diff_tags,
-                   primary_artist, primary_from_context, CHECKED_FIELDS)
+                   primary_artist, primary_from_context, album_artist_id_for,
+                   MB_ALBUMARTIST_ID, CHECKED_FIELDS)
 from .store import Store
 from . import matcher
 from . import verify
@@ -212,10 +216,18 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
         #   1. strip a trailing "feat./ft./featuring …" guest credit;
         #   2. for a joint credit ("X & Y"), reduce to whichever name matches the
         #      artist folder the album is filed under (the library's primary artist).
+        # When the credit is reduced, also reduce the album-artist MusicBrainz-ID
+        # list to the kept artist's single ID — players trust those IDs over the
+        # text and would otherwise re-expand the collaborators from them.
         if proposed.get("albumartist"):
-            aa = primary_artist(proposed["albumartist"])
-            aa = primary_from_context(aa, artist_folder)
+            orig_aa = proposed["albumartist"]
+            aa = primary_from_context(primary_artist(orig_aa), artist_folder)
             proposed = {**proposed, "albumartist": aa}
+            if aa != orig_aa and chosen:
+                ids = chosen.get("albumartist_ids") or []
+                if len(ids) > 1:
+                    kept = album_artist_id_for(aa, chosen.get("albumartists") or [], ids)
+                    proposed[MB_ALBUMARTIST_ID] = [kept] if kept else []
         if fill_only:  # only fill blanks; never overwrite an existing value
             proposed = {k: v for k, v in proposed.items() if not cur.get(k)}
         changed = diff_tags(cur, proposed) if proposed else []

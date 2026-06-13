@@ -174,6 +174,10 @@ def match_album(files: list[Path]) -> dict:
             "distance": round(float(m.distance), 4),
             "album": _g(m.info, "album"),
             "albumartist": _g(m.info, "artist"),
+            # Parallel album-artist credit names + MusicBrainz IDs (same order),
+            # so a reduced albumartist can keep exactly the matching ID.
+            "albumartists": list(_g(m.info, "artists") or []),
+            "albumartist_ids": list(_g(m.info, "artists_ids") or []),
             "year": _g(m.info, "year"),
             "album_id": _g(m.info, "album_id"),
             "country": _g(m.info, "country"),

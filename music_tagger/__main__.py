@@ -46,7 +46,7 @@ from datetime import datetime
 
 from .tags import (read_existing_tags, write_tags, restore_tags, diff_tags,
                    reduce_credit, MB_ALBUMARTIST_ID, MB_ARTIST_ID,
-                   ARTISTS_TAG, ALBUMARTISTS_TAG, CHECKED_FIELDS)
+                   ARTISTS_TAG, ALBUMARTISTS_TAG, CHECKED_FIELDS, COMPILATION)
 from .store import Store
 from . import matcher
 from . import verify
@@ -200,6 +200,30 @@ def _artist_folder_name(folder: str, root: str | None) -> str:
     return _LEADING_YEAR_RE.sub("", seg) or seg
 
 
+def _album_is_va(currents: list[dict]) -> bool:
+    """Heuristic: the album is a genuine various-artists compilation if its DOMINANT
+    album artist says 'Various Artists', or it has no album artist but multiple
+    distinct track artists. A lone stray 'Various Artists' track does NOT make the
+    album VA. Single-artist albums (even with feat. guests) are NOT VA. Drives whether
+    a bogus compilation flag is set to '1' (VA) or cleared."""
+    from collections import Counter
+    aa = Counter(str(c.get("albumartist") or "").strip() for c in currents if c.get("albumartist"))
+    ar = {str(c.get("artist") or "").strip() for c in currents if c.get("artist")}
+    if aa and "various" in aa.most_common(1)[0][0].lower():
+        return True
+    return not aa and len(ar) > 1
+
+
+def _compilation_fix(cur: dict, album_is_va: bool) -> dict:
+    """{'compilation': target} when the file's flag is bogus (scene watermark like
+    'PMEDIA'), else {}. Target is '1' for a real VA album, '' (clear) otherwise.
+    A legitimate '0'/'1' is left alone."""
+    val = str(cur.get(COMPILATION) or "").strip()
+    if val and val not in ("0", "1"):
+        return {COMPILATION: "1" if album_is_va else ""}
+    return {}
+
+
 def _forced_artist_tags(name: str) -> dict:
     """Override that pins every artist-bearing tag to a single name and clears the
     MusicBrainz IDs (so a player can't re-expand a stale credit from them). Used by
@@ -220,6 +244,10 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
     idx = decision["chosen_index"]
     chosen = cands[idx] if idx is not None else None
     artist_folder = _artist_folder_name(folder, root)
+    album_is_va = _album_is_va(list(proposal["current"].values()))
+    # Normalize a bogus compilation flag on default full runs only; --fill-only
+    # promises no overwrites and --only-fields means an explicitly narrowed scope.
+    fix_compilation = not fill_only and not only_fields
 
     files = []
     n_changed = 0
@@ -227,6 +255,7 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
         if force_artist:
             # Hard override: ignore the (often absent) match and pin the artist.
             proposed = _forced_artist_tags(force_artist)
+            proposed.update(_compilation_fix(cur, album_is_va))
             changed = diff_tags(cur, proposed)
             if changed:
                 n_changed += 1
@@ -275,6 +304,8 @@ def _build_result(folder: str, key: str, proposal: dict, decision: dict,
                 proposed[ARTISTS_TAG] = [new_ar]
         if fill_only:  # only fill blanks; never overwrite an existing value
             proposed = {k: v for k, v in proposed.items() if not cur.get(k)}
+        if fix_compilation:
+            proposed = {**proposed, **_compilation_fix(cur, album_is_va)}
         changed = diff_tags(cur, proposed) if proposed else []
         if changed:
             n_changed += 1

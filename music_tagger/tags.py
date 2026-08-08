@@ -6,7 +6,7 @@ from pathlib import Path
 from mutagen.flac import FLAC
 from mutagen.id3 import (
     ID3, ID3NoHeaderError,
-    TIT2, TPE1, TALB, TRCK, TDRC, TCON, TPE2, TPOS, TXXX,
+    TIT2, TPE1, TALB, TRCK, TDRC, TCON, TPE2, TPOS, TXXX, TCMP,
 )
 
 log = logging.getLogger(__name__)
@@ -33,6 +33,13 @@ _LIST_FRAMES = {
     ALBUMARTISTS_TAG:  ("ALBUMARTISTS", "albumartists", "albumartists"),
     ARTISTS_TAG:       ("ARTISTS", "artists", "artists"),
 }
+
+# Clearable scalar: the iTunes compilation flag (ID3 'TCMP' / Vorbis 'compilation').
+# A legitimate value is "1" (Various-Artists) or absent; scene rips (PMEDIA) stamp
+# garbage like "PMEDIA" into it, which Plex reads as VA and uses to pull the album
+# out of the artist's discography. Not in CHECKED_FIELDS — handled specially so it
+# can be CLEARED (proposed "" deletes the frame), which the normal write path can't do.
+COMPILATION = "compilation"
 
 _ID3_READ = {
     "TIT2": "title", "TPE1": "artist", "TALB": "album", "TPE2": "albumartist",
@@ -64,6 +71,9 @@ def read_existing_tags(filepath: str) -> dict:
                 fr = audio.get(f"TXXX:{desc}")
                 if fr is not None and list(fr.text):
                     tags[key] = list(fr.text)
+            tc = audio.getall("TCMP")
+            if tc and tc[0].text:
+                tags[COMPILATION] = str(tc[0].text[0])
         elif ext == ".flac":
             audio = FLAC(filepath)
             for key in _FLAC_FIELDS:
@@ -74,6 +84,9 @@ def read_existing_tags(filepath: str) -> dict:
                 vals = audio.get(fkey)
                 if vals:
                     tags[key] = list(vals)
+            cv = audio.get(COMPILATION)
+            if cv:
+                tags[COMPILATION] = cv[0]
     except Exception as e:  # noqa: BLE001 - reading must never crash a run
         log.debug(f"Could not read tags from {filepath}: {e}")
     return tags
@@ -98,6 +111,25 @@ def _apply_list_frames(audio, ext: str, source: dict) -> None:
                 del audio[fkey]
 
 
+def _apply_compilation(audio, ext: str, source: dict) -> None:
+    """Set/clear the compilation flag when `source` carries the key. A truthy value
+    sets it ("1"); an empty string deletes the frame. Keyed on presence so untouched
+    runs/snapshots leave it alone."""
+    if COMPILATION not in source:
+        return
+    val = str(source.get(COMPILATION) or "").strip()
+    if ext == ".mp3":
+        if val:
+            audio.setall("TCMP", [TCMP(encoding=3, text=[val])])
+        else:
+            audio.delall("TCMP")
+    else:
+        if val:
+            audio[COMPILATION] = val
+        elif COMPILATION in audio:
+            del audio[COMPILATION]
+
+
 def write_tags(filepath: str, tags: dict) -> bool:
     """Write the given {field: value} tags to the file. Returns True on success.
 
@@ -106,7 +138,7 @@ def write_tags(filepath: str, tags: dict) -> bool:
     """
     ext = Path(filepath).suffix.lower()
     clean = {k: str(v) for k, v in tags.items()
-             if k not in _LIST_FRAMES and v not in (None, "")}
+             if k not in _LIST_FRAMES and k != COMPILATION and v not in (None, "")}
     try:
         if ext == ".mp3":
             try:
@@ -117,6 +149,7 @@ def write_tags(filepath: str, tags: dict) -> bool:
                 if clean.get(key):
                     audio[Frame.__name__] = Frame(encoding=3, text=clean[key])
             _apply_list_frames(audio, ext, tags)
+            _apply_compilation(audio, ext, tags)
             audio.save(filepath)
         elif ext == ".flac":
             audio = FLAC(filepath)
@@ -124,6 +157,7 @@ def write_tags(filepath: str, tags: dict) -> bool:
                 if clean.get(key):
                     audio[key] = clean[key]
             _apply_list_frames(audio, ext, tags)
+            _apply_compilation(audio, ext, tags)
             audio.save()
         else:
             return False
@@ -155,6 +189,7 @@ def restore_tags(filepath: str, original: dict) -> bool:
                 else:
                     audio.delall(frame_name)
             _apply_list_frames(audio, ext, original)
+            _apply_compilation(audio, ext, original)
             audio.save(filepath)
         elif ext == ".flac":
             audio = FLAC(filepath)
@@ -164,6 +199,7 @@ def restore_tags(filepath: str, original: dict) -> bool:
                 elif field in audio:
                     del audio[field]
             _apply_list_frames(audio, ext, original)
+            _apply_compilation(audio, ext, original)
             audio.save()
         else:
             return False
@@ -319,4 +355,9 @@ def diff_tags(current: dict, proposed: dict) -> list[str]:
     for key, (_, _, label) in _LIST_FRAMES.items():
         if key in proposed and list(proposed.get(key) or []) != list(current.get(key) or []):
             changed.append(label)
+    # Compilation flag — exact compare so clearing garbage ("PMEDIA" -> "") counts as
+    # a change (an empty proposed for a normal field would otherwise be ignored).
+    if COMPILATION in proposed:
+        if str(proposed.get(COMPILATION) or "") != str(current.get(COMPILATION) or ""):
+            changed.append(COMPILATION)
     return changed

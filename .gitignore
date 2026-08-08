@@ -21,4 +21,5 @@ keys.txt
 .music_tagger.lock
 music_tagger_*.html
 music_tagger_unreadable.txt
+music_tagger_audit.txt
 

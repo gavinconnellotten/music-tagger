@@ -1,0 +1,20 @@
+# Keep the add-on build context small and reproducible: ship only the package
+# + project metadata. Runtime artifacts and the local venv must not leak in.
+.venv/
+venv/
+.git/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.db
+*.log
+*.log.bak
+*.bak
+*.html
+*.json
+keys.txt
+.env
+.env.*
+tools/
+sample_*.json
+.music_tagger.lock

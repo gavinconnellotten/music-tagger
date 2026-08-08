@@ -1,0 +1,39 @@
+name: Music Tagger
+version: "0.1.0"
+slug: music_tagger
+description: Periodic album-clustered metadata tagging (beets + MusicBrainz + Claude)
+# Set to your HA OS box's architecture (Pi 4/5 = aarch64, Intel NUC = amd64).
+arch:
+  - aarch64
+  - amd64
+  - armv7
+# s6-based HA base images manage their own init.
+init: false
+# Mount the network-storage shares read/write so the add-on can read AND retag files.
+# The music library must be added under Settings → System → Storage as Network Storage.
+map:
+  - media:rw
+  - share:rw
+options:
+  library_path: /media/music
+  confidence: 85
+  apply: true
+  run_on_start: false
+  cron: "0 4 * * 0"
+  anthropic_key: ""
+  acoustid_key: ""
+schema:
+  # Path INSIDE the container — where your SMB share is mounted (usually /media/<name>).
+  library_path: str
+  # Min Claude confidence to write on --apply (gates low/medium matches only; strong matches always apply).
+  confidence: int(0,100)
+  # true = write tags (journaled, reversible); false = dry-run reports only.
+  apply: bool
+  # Run once immediately on add-on (re)start, in addition to the schedule.
+  run_on_start: bool
+  # Standard 5-field cron expression. Default: weekly, Sunday 04:00.
+  cron: str
+  # Required for apply mode (low/medium albums need Claude). Stored as a secret.
+  anthropic_key: password
+  # Optional — only needed if you later enable --fingerprint fallback.
+  acoustid_key: password?
